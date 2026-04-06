@@ -5,6 +5,7 @@ REQUIREMENTS
 ------------
 - Windows 10 / 11 (64-bit)
 - Python 3.10 or later  →  https://www.python.org/downloads/
+  (Python 3.12 with CUDA is required for NVIDIA GPU usage)
   (check "Add Python to PATH" during install)
 - An NVIDIA GPU is recommended for fast KG building and captioning,
   but the application runs on CPU as well.
