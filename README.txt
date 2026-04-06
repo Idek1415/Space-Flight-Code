@@ -1,4 +1,4 @@
-O-Ring Knowledge Graph — Installation & Usage Guide
+NLP-for-PDFs — Installation & Usage Guide
 ====================================================
 
 REQUIREMENTS
@@ -13,8 +13,8 @@ REQUIREMENTS
 
 INSTALLATION
 ------------
-1.  Copy the entire OringKG\ folder to wherever you want to keep it
-    (e.g. C:\Users\You\OringKG\).
+1.  Copy the entire NLP-for-PDFs\ folder to wherever you want to keep it
+    (e.g. C:\Users\You\NLP-for-PDFs\).
 
 2.  Double-click launcher.bat.
     On the very first run this will:
@@ -27,7 +27,7 @@ INSTALLATION
 
 3.  (Optional) Create a desktop shortcut:
         python create_shortcut.py
-    This places an OringKG shortcut on your Desktop so you can
+    This places an NLP-for-PDFs shortcut on your Desktop so you can
     double-click it to launch without navigating to the folder.
 
 
@@ -86,7 +86,7 @@ PDF viewer controls
 
 FOLDER STRUCTURE
 ----------------
-OringKG\
+NLP-for-PDFs\
   launcher.bat              Double-click to launch
   launcher.py               First-run setup logic
   app.py                    PyQt6 GUI application
