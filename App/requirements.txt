@@ -1,0 +1,13 @@
+# O-Ring KG — Python dependencies
+# torch is NOT listed here; launcher.py installs the correct CUDA or CPU build.
+PyQt6>=6.6.0
+pdfplumber>=0.10.0
+PyMuPDF>=1.24.0
+networkx>=3.2.0
+matplotlib>=3.7.0
+sentence-transformers>=2.7.0
+transformers>=4.40.0
+Pillow>=10.0.0
+nltk>=3.8.0
+rank_bm25
+hnswlib
