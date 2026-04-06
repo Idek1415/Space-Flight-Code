@@ -99,22 +99,38 @@ def _pdf_hash(pdf_path: Path) -> str:
 
 def app_save_kg(pdf_path: Path, G, index: dict,
                 model_name: str = "", caption_model: str = "") -> Path:
+    import copy
     import torch
     save_dir = _app_save_dir(pdf_path)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    with open(save_dir / "graph.pkl", "wb") as f:
-        pickle.dump(G, f, protocol=pickle.HIGHEST_PROTOCOL)
+    # Prune Cell/Triple nodes (redundant with Row text)
+    pruned_G = copy.deepcopy(G)
+    to_remove = [n for n, d in pruned_G.nodes(data=True)
+                 if d.get("type") in ("Cell", "Triple")]
+    pruned_G.remove_nodes_from(to_remove)
 
+    with open(save_dir / "graph.pkl", "wb") as f:
+        pickle.dump(pruned_G, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    # Texts omitted — reconstructed from graph on load
     with open(save_dir / "index_meta.json", "w") as f:
         json.dump({
             "ids":   index.get("ids", []),
             "types": index.get("types", []),
-            "texts": index.get("texts", []),
         }, f)
 
+    # Embeddings stored as float16
     if index.get("embeddings") is not None:
-        torch.save(index["embeddings"].cpu(), save_dir / "embeddings.pt")
+        torch.save(index["embeddings"].half().cpu(), save_dir / "embeddings.pt")
+
+    # Persist HNSW index
+    hnsw = index.get("hnsw")
+    if hnsw is not None:
+        try:
+            hnsw.save_index(str(save_dir / "hnsw.bin"))
+        except Exception:
+            pass
 
     meta = {
         "pdf_path":      str(pdf_path.resolve()),
@@ -126,6 +142,7 @@ def app_save_kg(pdf_path: Path, G, index: dict,
         "node_count":    G.number_of_nodes(),
         "edge_count":    G.number_of_edges(),
         "index_count":   len(index.get("ids", [])),
+        "pruned_nodes":  len(to_remove),
     }
     with open(save_dir / "metadata.json", "w") as f:
         json.dump(meta, f, indent=2)
@@ -160,13 +177,39 @@ def app_load_kg(pdf_path: Path):
         idx_data = json.load(f)
 
     emb_path   = save_dir / "embeddings.pt"
-    embeddings = torch.load(emb_path, map_location="cpu") if emb_path.exists() else None
+    embeddings = None
+    if emb_path.exists():
+        embeddings = torch.load(emb_path, map_location="cpu")
+        if embeddings is not None and embeddings.dtype == torch.float16:
+            embeddings = embeddings.float()
+
+    ids   = idx_data.get("ids", [])
+    types = idx_data.get("types", [])
+
+    # Reconstruct texts from graph (or fall back to legacy JSON texts)
+    texts = idx_data.get("texts", [])
+    if not texts and ids:
+        texts = [G.nodes[nid].get("text", "") if G.has_node(nid) else ""
+                 for nid in ids]
+
+    # Load persisted HNSW index
+    hnsw = None
+    hnsw_path = save_dir / "hnsw.bin"
+    if hnsw_path.exists() and embeddings is not None:
+        try:
+            import hnswlib
+            dim = embeddings.shape[1]
+            hnsw = hnswlib.Index(space="cosine", dim=dim)
+            hnsw.load_index(str(hnsw_path), max_elements=embeddings.shape[0])
+        except Exception:
+            hnsw = None
 
     index = {
-        "ids":        idx_data.get("ids", []),
-        "types":      idx_data.get("types", []),
-        "texts":      idx_data.get("texts", []),
+        "ids":        ids,
+        "types":      types,
+        "texts":      texts,
         "embeddings": embeddings,
+        "hnsw":       hnsw,
     }
     return G, index, meta
 

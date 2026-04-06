@@ -55,6 +55,44 @@ def detect_toc(pdf_path, max_pages=20):
     return {"toc_page_numbers": toc_page_numbers, "entries": entries}
 
 
+# ── Multi-column detection ────────────────────────────────────────────────────
+
+def _detect_columns(page) -> int:
+    """Detect whether a page uses a multi-column layout (returns 1 or 2)."""
+    try:
+        words = page.extract_words()
+    except Exception:
+        return 1
+    if not words or len(words) < 20:
+        return 1
+    mid_x = page.width / 2
+    margin = page.width * 0.08
+    center_words = [
+        w for w in words
+        if (mid_x - margin <= w["x0"] <= mid_x + margin
+            or mid_x - margin <= w["x1"] <= mid_x + margin)
+    ]
+    center_ratio = len(center_words) / len(words)
+    if center_ratio < 0.05:
+        left_words  = [w for w in words if w["x1"] < mid_x]
+        right_words = [w for w in words if w["x0"] > mid_x]
+        left_ratio  = len(left_words) / len(words)
+        right_ratio = len(right_words) / len(words)
+        if left_ratio > 0.25 and right_ratio > 0.25:
+            return 2
+    return 1
+
+
+def _extract_column_text(page, num_columns: int) -> str:
+    """Extract text respecting column layout to avoid interleaving."""
+    if num_columns <= 1:
+        return page.extract_text() or ""
+    mid_x = page.width / 2
+    left  = page.crop((0, 0, mid_x, page.height)).extract_text() or ""
+    right = page.crop((mid_x, 0, page.width, page.height)).extract_text() or ""
+    return left.rstrip() + "\n\n" + right.lstrip()
+
+
 # ── Table extraction ─────────────────────────────────────────────────────────
 
 def extract_tables_with_context(pdf_path, margin=50, heading_size_threshold=11, use_generative=False):
@@ -89,14 +127,21 @@ def extract_tables_with_context(pdf_path, margin=50, heading_size_threshold=11, 
             if (page_num + 1) in toc["toc_page_numbers"]:
                 continue
 
+            # ── Detect multi-column layout ────────────────────────────────
+            num_columns = _detect_columns(page)
+
             # ── Classify all text blocks on this page ──────────────────────
             blocks = classify_page_blocks(page, use_generative=use_generative)
-            prose_parts = [
-                b["text"] for b in blocks
-                if b["block_type"] in ("description", "summary")
-            ]
+            if num_columns > 1:
+                prose_text = _extract_column_text(page, num_columns)
+            else:
+                prose_parts = [
+                    b["text"] for b in blocks
+                    if b["block_type"] in ("description", "summary")
+                ]
+                prose_text = " ".join(prose_parts).strip()
             pages_data[page_num + 1] = {
-                "prose":  " ".join(prose_parts).strip(),
+                "prose":  prose_text,
                 "blocks": blocks,
             }
 
@@ -105,11 +150,21 @@ def extract_tables_with_context(pdf_path, margin=50, heading_size_threshold=11, 
             for table in tables:
                 bbox = table.bbox
 
-                above_bbox = (0, max(0, bbox[1] - margin), page.width, bbox[1])
-                above_text = (page.crop(above_bbox).extract_text() or "").strip()
+                above_top = max(0, bbox[1] - margin)
+                above_bot = max(above_top, bbox[1])
+                if above_bot - above_top > 1:
+                    above_text = (page.crop((0, above_top, page.width, above_bot))
+                                  .extract_text() or "").strip()
+                else:
+                    above_text = ""
 
-                below_bbox = (0, bbox[3], page.width, min(page.height, bbox[3] + margin))
-                below_text = (page.crop(below_bbox).extract_text() or "").strip()
+                below_top = max(0, bbox[3])
+                below_bot = min(page.height, bbox[3] + margin)
+                if below_bot - below_top > 1:
+                    below_text = (page.crop((0, below_top, page.width, below_bot))
+                                  .extract_text() or "").strip()
+                else:
+                    below_text = ""
 
                 heading = _find_section_heading(page, bbox, heading_size_threshold)
 

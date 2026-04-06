@@ -67,6 +67,7 @@ _NEGATION_PENALTY_WEIGHT = 0.55
 _RRF_K                   = 60
 _DENSE_WEIGHT            = 0.60
 _BM25_WEIGHT             = 0.40
+_BM25_CONFIDENCE_RATIO   = 2.5     # skip HyDE+CE when top BM25 ≥ 2.5× runner-up
 _HNSW_M                  = 32
 _HNSW_EF_CONSTRUCTION    = 200
 _HNSW_EF_SEARCH          = 80
@@ -152,7 +153,8 @@ def _get_reranker():
 # ---------------------------------------------------------------------------
 
 def _tokenize(text: str) -> list[str]:
-    return re.findall(r"\b\w+\b", text.lower())
+    """Tokenize keeping hyphenated terms and alphanumeric codes intact."""
+    return re.findall(r"[\w]+(?:-[\w]+)*", text.lower())
 
 
 def _build_bm25(texts: list[str]):
@@ -172,6 +174,27 @@ def _bm25_scores(bm25_index, query_tokens: list[str]) -> list[float]:
         return bm25_index.get_scores(query_tokens).tolist()
     except Exception:
         return []
+
+
+def _bm25_is_confident(
+    scores: list[float],
+    ratio: float = _BM25_CONFIDENCE_RATIO,
+) -> bool:
+    """True when the top BM25 hit is well-separated from the runner-up.
+
+    A high ratio means a strong lexical match exists and CE reranking
+    would likely hurt by overriding the correct BM25 answer.
+    """
+    if not scores:
+        return False
+    sorted_desc = sorted(scores, reverse=True)
+    top = sorted_desc[0]
+    if top <= 0:
+        return False
+    runner_up = sorted_desc[1] if len(sorted_desc) > 1 else 0.0
+    if runner_up <= 0:
+        return True
+    return top / runner_up >= ratio
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +510,28 @@ def build_index(G) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Adaptive page scoring
+# ---------------------------------------------------------------------------
+
+def _adaptive_page_weights(
+    page_to_items: dict[int, list],
+) -> tuple[float, float]:
+    """Return (alpha, beta) tuned to document density.
+
+    Table-heavy docs benefit from max-score dominance (high alpha);
+    prose-heavy docs benefit from a balanced mean blend (higher beta).
+    """
+    if not page_to_items:
+        return _PAGE_SCORE_ALPHA, _PAGE_SCORE_BETA
+    avg_items = sum(len(v) for v in page_to_items.values()) / len(page_to_items)
+    if avg_items >= 5:
+        return 0.80, 0.20
+    if avg_items <= 2:
+        return 0.55, 0.45
+    return _PAGE_SCORE_ALPHA, _PAGE_SCORE_BETA
+
+
+# ---------------------------------------------------------------------------
 # Query
 # ---------------------------------------------------------------------------
 
@@ -514,15 +559,25 @@ def query(
 
     n = len(index["ids"])
 
-    # 1. Negation
-    positive_query, negated_terms = parse_negation(query_text)
+    # 1. Synonym expansion first (catches synonyms of negated terms)
+    expanded_full = expand_synonyms(query_text)
+
+    # 2. Negation on expanded text (strips negated clusters + their synonyms)
+    positive_query, negated_terms = parse_negation(expanded_full)
     if not positive_query.strip():
-        positive_query = query_text
+        positive_query = expanded_full
+    expanded_query = positive_query
 
-    # 2. Synonym expansion
-    expanded_query = expand_synonyms(positive_query)
+    # 3. BM25 scoring (computed early for confidence gate)
+    bm25_raw = _bm25_scores(index.get("bm25"), _tokenize(expanded_query))
 
-    # 3. Dense scoring
+    # 4. Confidence gate — skip HyDE+CE when BM25 has a clear winner
+    bm25_confident = _bm25_is_confident(bm25_raw) if bm25_raw else False
+    if bm25_confident:
+        use_hyde = False
+        use_generative = False
+
+    # 5. Dense scoring
     pos_emb = model.encode(expanded_query, convert_to_tensor=True, device=DEVICE)
 
     if use_hyde:
@@ -540,7 +595,7 @@ def query(
     else:
         pos_scores = util.cos_sim(pos_emb, embeddings)[0].tolist()
 
-    # Negation penalty
+    # 6. Negation penalty
     neg_scores = [0.0] * n
     for term in negated_terms:
         if not term.strip():
@@ -563,10 +618,7 @@ def query(
     dense_net = [ps - _NEGATION_PENALTY_WEIGHT * ns
                  for ps, ns in zip(pos_scores, neg_scores)]
 
-    # 4. BM25
-    bm25_raw = _bm25_scores(index.get("bm25"), _tokenize(expanded_query))
-
-    # 5. RRF fusion
+    # 7. RRF fusion (bm25_raw already computed above)
     dense_pool = candidate_idxs if candidate_idxs else list(range(n))
     dense_ranking = sorted(dense_pool, key=lambda i: dense_net[i], reverse=True)
     if bm25_raw:
@@ -584,7 +636,7 @@ def query(
         else:
             final_scores = [0.0] * n
 
-    # 6. Page aggregation
+    # 8. Page aggregation (adaptive alpha/beta based on doc density)
     page_to_items: dict[int, list[tuple[int, float]]] = {}
     for idx, score in enumerate(final_scores):
         page = G.nodes[index["ids"][idx]].get("page")
@@ -595,19 +647,20 @@ def query(
     if not page_to_items:
         return []
 
+    alpha, beta = _adaptive_page_weights(page_to_items)
     page_scores: list[tuple[int, float]] = []
     for page, items in page_to_items.items():
         values = [s for _, s in items]
-        pg_sc  = _PAGE_SCORE_ALPHA * max(values) + _PAGE_SCORE_BETA * (sum(values)/len(values))
+        pg_sc  = alpha * max(values) + beta * (sum(values) / len(values))
         page_scores.append((page, pg_sc))
 
-    # 7. Optional cross-encoder reranking
+    # 9. Optional cross-encoder reranking (skipped by confidence gate)
     if use_generative:
         page_scores = _ce_rerank(query_text, page_scores, G, top_n=20)
     else:
         page_scores.sort(key=lambda x: x[1], reverse=True)
 
-    # 8. Build result dicts
+    # 10. Build result dicts
     results = []
     for rank, (page, page_score) in enumerate(page_scores[:top_k], start=1):
         best_idx, best_score = max(page_to_items[page], key=lambda x: x[1])

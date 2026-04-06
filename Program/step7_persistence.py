@@ -6,9 +6,10 @@ does not need to be re-processed on every run.
 
 Saved structure (in a folder beside the PDF):
     <pdf_stem>_kg/
-        graph.pkl         — NetworkX graph (pickle)
-        index_meta.json   — node IDs, types, texts
-        embeddings.pt     — torch tensor
+        graph.pkl         — NetworkX graph (pickle, Cell/Triple nodes pruned)
+        index_meta.json   — node IDs and types (texts reconstructed from graph)
+        embeddings.pt     — torch tensor (float16 for ~50% size savings)
+        hnsw.bin          — HNSW ANN index (avoids rebuild on load)
         metadata.json     — PDF hash, timestamps, model names
 
 The PDF is identified by a SHA-256 hash, so if the file changes the
@@ -17,6 +18,7 @@ saved graph is automatically invalidated.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import pickle
@@ -25,6 +27,13 @@ from datetime import datetime
 from pathlib import Path
 
 import torch
+
+try:
+    import hnswlib as _hnswlib
+    _HNSW_AVAILABLE = True
+except ImportError:
+    _hnswlib = None   # type: ignore[assignment,misc]
+    _HNSW_AVAILABLE = False
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +57,21 @@ def _pdf_hash(pdf_path: str | Path) -> str:
 # Save
 # ---------------------------------------------------------------------------
 
+def _prune_graph_for_storage(G):
+    """Return a copy of G with Cell and Triple nodes removed.
+
+    These nodes' information is fully redundant with Row node text
+    and is not used by the query pipeline.
+    """
+    pruned = copy.deepcopy(G)
+    to_remove = [
+        n for n, d in pruned.nodes(data=True)
+        if d.get("type") in ("Cell", "Triple")
+    ]
+    pruned.remove_nodes_from(to_remove)
+    return pruned, len(to_remove)
+
+
 def save_kg(
     pdf_path: str | Path,
     G,
@@ -59,27 +83,43 @@ def save_kg(
     """
     Save graph and index to disk beside the PDF.
 
+    Storage optimisations applied:
+    - Cell/Triple nodes pruned from graph (redundant with Row text)
+    - Embeddings stored in float16 (halves size, negligible quality loss)
+    - HNSW index persisted (avoids rebuild on load)
+    - Index texts omitted from JSON (reconstructed from graph on load)
+
     Returns the save directory path.
     """
     save_dir = _save_dir(pdf_path)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    # Graph
+    # Graph — prune redundant Cell / Triple nodes
+    pruned_G, pruned_count = _prune_graph_for_storage(G)
     with open(save_dir / "graph.pkl", "wb") as f:
-        pickle.dump(G, f, protocol=pickle.HIGHEST_PROTOCOL)
+        pickle.dump(pruned_G, f, protocol=pickle.HIGHEST_PROTOCOL)
+    if pruned_count:
+        print(f"  Pruned {pruned_count} Cell/Triple nodes from saved graph.")
 
-    # Index metadata (JSON-serialisable parts)
+    # Index metadata (texts reconstructed from graph on load)
     index_data = {
         "ids":   index.get("ids", []),
         "types": index.get("types", []),
-        "texts": index.get("texts", []),
     }
     with open(save_dir / "index_meta.json", "w") as f:
         json.dump(index_data, f)
 
-    # Embeddings tensor
+    # Embeddings — stored as float16 (~50% size savings)
     if index.get("embeddings") is not None:
-        torch.save(index["embeddings"].cpu(), save_dir / "embeddings.pt")
+        torch.save(index["embeddings"].half().cpu(), save_dir / "embeddings.pt")
+
+    # HNSW index
+    hnsw = index.get("hnsw")
+    if hnsw is not None and _HNSW_AVAILABLE:
+        try:
+            hnsw.save_index(str(save_dir / "hnsw.bin"))
+        except Exception:
+            pass
 
     # Metadata
     meta = {
@@ -91,6 +131,7 @@ def save_kg(
         "node_count":    G.number_of_nodes(),
         "edge_count":    G.number_of_edges(),
         "index_count":   len(index.get("ids", [])),
+        "pruned_nodes":  pruned_count,
     }
     with open(save_dir / "metadata.json", "w") as f:
         json.dump(meta, f, indent=2)
@@ -110,7 +151,8 @@ def load_kg(pdf_path: str | Path) -> tuple | None:
     Returns (G, index, metadata) if a valid save exists and the PDF hash matches,
     or None if nothing is saved or the PDF has changed.
 
-    ``metadata`` is the ``metadata.json`` dict (includes ``model_name`` for the embedder).
+    Handles both legacy saves (texts in JSON, float32 embeddings) and
+    optimised saves (texts reconstructed from graph, float16 → float32).
     """
     save_dir  = _save_dir(pdf_path)
     meta_path = save_dir / "metadata.json"
@@ -143,15 +185,39 @@ def load_kg(pdf_path: str | Path) -> tuple | None:
     with open(index_path) as f:
         index_data = json.load(f)
 
+    # Embeddings — upcast float16 → float32 for compute
     embeddings = None
     if emb_path.exists():
         embeddings = torch.load(emb_path, map_location="cpu")
+        if embeddings is not None and embeddings.dtype == torch.float16:
+            embeddings = embeddings.float()
+
+    ids   = index_data.get("ids", [])
+    types = index_data.get("types", [])
+
+    # Reconstruct texts from graph (or fall back to legacy JSON texts)
+    texts = index_data.get("texts", [])
+    if not texts and ids:
+        texts = [G.nodes[nid].get("text", "") if G.has_node(nid) else ""
+                 for nid in ids]
+
+    # Load persisted HNSW index if available
+    hnsw = None
+    hnsw_path = save_dir / "hnsw.bin"
+    if hnsw_path.exists() and _HNSW_AVAILABLE and embeddings is not None:
+        try:
+            dim = embeddings.shape[1]
+            hnsw = _hnswlib.Index(space="cosine", dim=dim)
+            hnsw.load_index(str(hnsw_path), max_elements=embeddings.shape[0])
+        except Exception:
+            hnsw = None
 
     index = {
-        "ids":        index_data.get("ids", []),
-        "types":      index_data.get("types", []),
-        "texts":      index_data.get("texts", []),
+        "ids":        ids,
+        "types":      types,
+        "texts":      texts,
         "embeddings": embeddings,
+        "hnsw":       hnsw,
     }
 
     print(f"  Loaded: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges, "
