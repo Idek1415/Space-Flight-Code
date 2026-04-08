@@ -27,3 +27,6 @@ Program/Archetecture.txt
 
 # Local scratch ignore file
 gitignore
+
+# Local-only evaluation artifacts
+Testing/
