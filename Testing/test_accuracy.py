@@ -1,23 +1,14 @@
 """
 test_accuracy.py — Retrieval Accuracy Evaluation Suite
 ========================================================
-Evaluates retrieval accuracy on both **synthetic** (Type A–D) and
-**real-world** (Type E–I) documents.
+Evaluates retrieval accuracy on **real-world** documents only (Type E-I).
 
-Synthetic KGs add pseudo-Row nodes from each page's prose text so
-``build_index`` encodes narrative content (the live indexer only
-includes Row and Image nodes, not Page nodes).
-
-Real-world documents are downloaded once from public URLs and cached
-in ``Testing/pdf_cache/``.  Ground truth is resolved dynamically by
+Real-world documents are read from ``Testing/pdf_cache/`` only.
+Ground truth is resolved dynamically by
 matching content keywords against extracted page text.
 
 Document types
 --------------
-Type A — Engineering datasheet (table-heavy, like an O-ring catalog).
-Type B — Technical manual (prose-heavy, few tables).
-Type C — Financial report (mixed: charts described in prose + summary tables).
-Type D — Scientific abstract (academic prose, equations, citations).
 Type E — IRS Publication 17 (Federal Tax Guide).
 Type F — NIST SP 800-63B (Digital Identity Guidelines).
 Type G — NASA Apollo 11 Mission Report.
@@ -36,16 +27,11 @@ Semantic-match— Dense-critical: query uses synonym/paraphrase
 
 Usage
 -----
-    python test_accuracy.py                    # all docs, both modes, both pipelines
+    python test_accuracy.py                    # all real docs (E-I), adaptive mode
     python test_accuracy.py --verbose          # show per-query detail
-    python test_accuracy.py --type A           # run only doc type A
     python test_accuracy.py --type E           # run only real doc E
-    python test_accuracy.py --pipeline mock    # injected KG only
-    python test_accuracy.py --pipeline extract # pdfplumber extraction only
-    python test_accuracy.py --pipeline real    # real PDFs only (E–I)
-    python test_accuracy.py --mode baseline    # HyDE off, cross-encoder off
-    python test_accuracy.py --mode hyde_ce     # HyDE on, cross-encoder on
-    python test_accuracy.py --no-generative    # deprecated: same as --mode baseline
+    python test_accuracy.py --mode adaptive    # single mode (HyDE/CE applied per-case)
+    python test_accuracy.py --no-generative    # deprecated alias; kept for compatibility
 """
 
 from __future__ import annotations
@@ -61,7 +47,6 @@ import sys
 import tempfile
 import textwrap
 import time
-import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -318,8 +303,8 @@ REAL_PDF_SOURCES: dict[str, dict] = {
 }
 
 
-def _download_pdf(doc_type: str, *, verbose: bool = False) -> Path | None:
-    """Download a real PDF to pdf_cache/ if not already present."""
+def _get_cached_pdf(doc_type: str, *, verbose: bool = False) -> Path | None:
+    """Return cached real PDF from pdf_cache/; do not download."""
     info = REAL_PDF_SOURCES.get(doc_type)
     if info is None:
         return None
@@ -328,30 +313,11 @@ def _download_pdf(doc_type: str, *, verbose: bool = False) -> Path | None:
     if dest.exists() and dest.stat().st_size > 1000:
         _status(f"PDF cache hit: {info['desc']}")
         return dest
-    url = info["url"]
-    _status(f"Downloading {info['desc']}...")
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        downloaded = 0
-        last_report = time.time()
-        with urllib.request.urlopen(req, timeout=120) as resp, open(dest, "wb") as f:
-            while True:
-                chunk = resp.read(65536)
-                if not chunk:
-                    break
-                f.write(chunk)
-                downloaded += len(chunk)
-                now = time.time()
-                if now - last_report >= 5.0:
-                    _status(f"  ... {downloaded / 1_000_000:.1f} MB downloaded")
-                    last_report = now
-        _status(f"Saved {info['file']}  ({dest.stat().st_size / 1_000_000:.1f} MB)")
-        return dest
-    except Exception as e:
-        _status(f"Download FAILED: {e}")
-        if dest.exists():
-            dest.unlink()
-        return None
+    _status(
+        f"Missing cached PDF for {info['desc']}: expected at {dest}. "
+        "Place the file in Testing/pdf_cache/ and rerun."
+    )
+    return None
 
 
 # ===========================================================================
@@ -1486,7 +1452,6 @@ def run_queries(
     *,
     document_title: str = "",
     use_generative: bool = False,
-    use_hyde:       bool = False,
     top_k:          int = 5,
     verbose:        bool = False,
     on_query_done:  Callable[[], None] | None = None,
@@ -1524,7 +1489,6 @@ def run_queries(
                     G, index, item.query,
                     top_k=top_k,
                     use_generative=use_generative,
-                    use_hyde=use_hyde,
                 )
             got_pages = [r["page"] for r in hits if r.get("page")]
         except Exception as e:
@@ -1734,16 +1698,16 @@ def save_report(summary: dict, path: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="KG retrieval accuracy evaluation")
     parser.add_argument("--type",
-                        choices=["A","B","C","D","E","F","G","H","I"],
+                        choices=["E","F","G","H","I"],
                         help="Run only this document type")
     parser.add_argument("--verbose",       action="store_true",
                         help="Print per-query detail")
     parser.add_argument(
         "--mode",
-        choices=["both", "hyde_ce", "baseline"],
-        default="both",
-        help="both: HyDE+CE then baseline; hyde_ce: HyDE and cross-encoder on; "
-             "baseline: both off",
+        choices=["adaptive", "both", "hyde_ce", "baseline"],
+        default="adaptive",
+        help="adaptive: single run using current query behavior (case-by-case HyDE/CE). "
+             "Legacy aliases: both/hyde_ce/baseline map to adaptive.",
     )
     parser.add_argument("--no-generative", action="store_true",
                         help="Deprecated: forces baseline (HyDE off, CE off)")
@@ -1751,10 +1715,9 @@ def main() -> None:
                         help="Number of results to retrieve (default 5)")
     parser.add_argument(
         "--pipeline",
-        choices=["mock", "extract", "real", "both", "all"],
-        default="all",
-        help="mock: injected KG; extract: pdfplumber; real: real PDFs (E-I); "
-             "both: mock+extract; all: mock+extract+real",
+        choices=["real"],
+        default="real",
+        help="Real PDFs only (E-I).",
     )
     parser.add_argument("--save",          type=str, default="",
                         help="Path to save JSON report")
@@ -1762,71 +1725,40 @@ def main() -> None:
 
     eval_mode = args.mode
     if args.no_generative:
-        eval_mode = "baseline"
+        _status("`--no-generative` is deprecated and now treated as adaptive mode.")
+        eval_mode = "adaptive"
+    if eval_mode in ("both", "hyde_ce", "baseline"):
+        _status(f"`--mode {eval_mode}` is deprecated and now treated as adaptive mode.")
+        eval_mode = "adaptive"
 
-    mode_runs: list[tuple[str, bool, bool, str]] = []
-    if eval_mode == "both":
-        mode_runs = [
-            ("with_hyde_ce", True, True,
-             "HyDE on, cross-encoder reranking on"),
-            ("baseline", False, False,
-             "HyDE off, cross-encoder reranking off"),
-        ]
-    elif eval_mode == "hyde_ce":
-        mode_runs = [
-            ("with_hyde_ce", True, True,
-             "HyDE on, cross-encoder reranking on"),
-        ]
-    else:
-        mode_runs = [
-            ("baseline", False, False,
-             "HyDE off, cross-encoder reranking off"),
-        ]
+    # Single-mode evaluation only: HyDE / reranking are now applied per-query.
+    mode_runs: list[tuple[str, bool, str]] = [
+        ("adaptive", True, "Adaptive retrieval (case-by-case HyDE/CE)")
+    ]
 
-    SYNTHETIC_TYPES = {
-        "A": (TYPE_A_PAGES, DOC_TYPE_LABELS["A"]),
-        "B": (TYPE_B_PAGES, DOC_TYPE_LABELS["B"]),
-        "C": (TYPE_C_PAGES, DOC_TYPE_LABELS["C"]),
-        "D": (TYPE_D_PAGES, DOC_TYPE_LABELS["D"]),
-    }
+    SYNTHETIC_TYPES = {}
 
     # Determine which types to run
     if args.type:
         types_to_run = [args.type]
     else:
-        types_to_run = ["A", "B", "C", "D"] + list(REAL_PDF_SOURCES.keys())
+        types_to_run = list(REAL_PDF_SOURCES.keys())
 
     # Determine which pipeline runs to use
-    pipeline_runs: list[tuple[str, str]] = []
-    if args.pipeline in ("mock", "both", "all"):
-        pipeline_runs.append(("mock", "Mock KG (injected extraction)"))
-    if args.pipeline in ("extract", "both", "all"):
-        pipeline_runs.append(("extract", "Real extraction (pdfplumber + KG)"))
-    if args.pipeline in ("real", "all"):
-        pipeline_runs.append(("real", "Real PDF documents (E-I)"))
-
-    # Also run real docs if a specific real type is selected
-    if args.type and args.type in REAL_PDF_SOURCES and "real" not in [p[0] for p in pipeline_runs]:
-        pipeline_runs.append(("real", "Real PDF documents"))
+    pipeline_runs: list[tuple[str, str]] = [("real", "Real PDF documents (E-I)")]
 
     combined_report: dict[str, dict] = {}
 
     # Count queries
-    synth_queries = sum(
-        len([q for q in QA_DATASET if q.doc_type == t])
-        for t in types_to_run if t in SYNTHETIC_TYPES
-    )
+    synth_queries = 0
     real_queries = sum(
         len([q for q in REAL_QA_DATASET if q.doc_type == t])
         for t in types_to_run if t in REAL_PDF_SOURCES
     )
-    total_per_pipeline_mode = synth_queries + real_queries
-    synth_pipeline_count = sum(1 for pk, _ in pipeline_runs if pk in ("mock", "extract"))
+    total_per_pipeline_mode = real_queries
+    synth_pipeline_count = 0
     real_pipeline_count  = sum(1 for pk, _ in pipeline_runs if pk == "real")
-    total_queries = (
-        synth_queries * synth_pipeline_count * len(mode_runs)
-        + real_queries * real_pipeline_count * len(mode_runs)
-    )
+    total_queries = real_queries * real_pipeline_count * len(mode_runs)
     progress_done = [0]
     _last_progress_time = [time.time()]
 
@@ -1898,9 +1830,9 @@ def main() -> None:
 
             for doc_type in real_types:
                 fail_key = f"real:{doc_type}"
-                pdf_path = _download_pdf(doc_type, verbose=args.verbose)
+                pdf_path = _get_cached_pdf(doc_type, verbose=args.verbose)
                 if pdf_path is None:
-                    _status(f"Skipping Type {doc_type}: PDF download failed")
+                    _status(f"Skipping Type {doc_type}: cached PDF not available")
                     failed_types.add(fail_key)
                     continue
 
@@ -1933,7 +1865,7 @@ def main() -> None:
     _status("PHASE 2: Running queries")
     print(f"{'='*60}", flush=True)
 
-    for run_key, use_gen, use_hyde, run_label in mode_runs:
+    for run_key, use_gen, run_label in mode_runs:
         mode_payload: dict[str, dict] = {}
         print(f"\n{'-'*60}", flush=True)
         _status(f"MODE: {run_label}")
@@ -1957,7 +1889,6 @@ def main() -> None:
                             G, index, items,
                             document_title=description,
                             use_generative=use_gen,
-                            use_hyde=use_hyde,
                             top_k=args.top_k,
                             verbose=args.verbose,
                             on_query_done=_on_query_done if show_progress else None,
@@ -1983,7 +1914,6 @@ def main() -> None:
                             G, index, items,
                             document_title=description,
                             use_generative=use_gen,
-                            use_hyde=use_hyde,
                             top_k=args.top_k,
                             verbose=args.verbose,
                             on_query_done=_on_query_done if show_progress else None,
@@ -2014,7 +1944,7 @@ def main() -> None:
     if combined_report:
         print_overall_comparison(
             combined_report,
-            [(m[0], m[3]) for m in mode_runs],
+            [(m[0], m[2]) for m in mode_runs],
         )
         save_path = args.save or str(_HERE / "test_report.json")
         save_report(combined_report, Path(save_path))

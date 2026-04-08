@@ -24,3 +24,6 @@ Program/Archetecture.txt
 
 # Duplicate of App/assets (app uses App/assets only)
 /assets/
+
+# Local scratch ignore file
+gitignore
