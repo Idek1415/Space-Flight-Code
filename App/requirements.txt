@@ -3,6 +3,8 @@
 PyQt6>=6.6.0
 pdfplumber>=0.10.0
 PyMuPDF>=1.24.0
+# Optional: OCR fallback in Program/step1_pdf_extraction.py (requires Tesseract installed on PATH)
+pytesseract>=0.3.10
 networkx>=3.2.0
 matplotlib>=3.7.0
 sentence-transformers>=2.7.0
