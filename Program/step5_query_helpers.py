@@ -622,7 +622,13 @@ def query(
     dense_pool = candidate_idxs if candidate_idxs else list(range(n))
     dense_ranking = sorted(dense_pool, key=lambda i: dense_net[i], reverse=True)
     if bm25_raw:
-        bm25_ranking = sorted(range(n), key=lambda i: bm25_raw[i], reverse=True)
+        bm25_top = max(bm25_raw) if bm25_raw else 0.0
+        bm25_threshold = bm25_top * 0.08
+        bm25_ranking = sorted(
+            [i for i in range(n) if bm25_raw[i] >= bm25_threshold],
+            key=lambda i: bm25_raw[i],
+            reverse=True,
+        )
         fused = _rrf_fuse([dense_ranking, bm25_ranking],
                           weights=[_DENSE_WEIGHT, _BM25_WEIGHT])
         idx_to_score = {idx: sc for idx, sc in fused}
@@ -654,11 +660,12 @@ def query(
         pg_sc  = alpha * max(values) + beta * (sum(values) / len(values))
         page_scores.append((page, pg_sc))
 
+    # Sort by fused page score so CE sees the true top-N candidates (dict order is arbitrary).
+    page_scores.sort(key=lambda x: x[1], reverse=True)
+
     # 9. Optional cross-encoder reranking (skipped by confidence gate)
     if use_generative:
         page_scores = _ce_rerank(query_text, page_scores, G, top_n=20)
-    else:
-        page_scores.sort(key=lambda x: x[1], reverse=True)
 
     # 10. Build result dicts
     results = []
