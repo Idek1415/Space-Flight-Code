@@ -21,6 +21,36 @@ from App.console_progress import status_line, status_line_done
 PROXIMITY_THRESHOLD = 150
 
 
+def _split_prose_chunks(text: str, max_chars: int = 400) -> list[str]:
+    """
+    Split page prose text into overlapping chunks suitable for dense indexing.
+    Splits on sentence boundaries first, then packs sentences into chunks
+    up to max_chars. Uses a smaller max_chars than the test harness (400 vs 600)
+    to give more granular coverage for short prose pages like academic papers.
+    """
+    import re
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    chunks, current = [], ""
+    for sent in sentences:
+        sent = sent.strip()
+        if not sent:
+            continue
+        if len(current) + len(sent) + 1 <= max_chars:
+            current = (current + " " + sent).strip()
+        else:
+            if current:
+                chunks.append(current)
+            # If a single sentence exceeds max_chars, split it hard
+            if len(sent) > max_chars:
+                for i in range(0, len(sent), max_chars):
+                    chunks.append(sent[i:i + max_chars])
+            else:
+                current = sent
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def build_knowledge_graph(extracted_tables, image_records=None,
                           use_generative=False):
     G = nx.MultiDiGraph()
@@ -43,6 +73,35 @@ def build_knowledge_graph(extracted_tables, image_records=None,
         prose = pages_data.get(p, {}).get("prose", "")
         G.add_node(f"page::{p}", type="Page", label=f"Page {p}",
                    page=p, prose=prose, text=prose or f"Page {p}")
+
+    # Add prose chunks as pseudo-Row nodes so build_index() encodes
+    # narrative content. Without this, Page node prose is never indexed
+    # because build_index only processes Row and Image nodes.
+    # Use a minimum chunk length of 40 chars to skip stray fragments.
+    for p in all_pages:
+        prose = pages_data.get(p, {}).get("prose", "")
+        if not prose or not prose.strip():
+            continue
+        page_node = f"page::{p}"
+        chunks = _split_prose_chunks(prose, max_chars=400)
+        for i, chunk in enumerate(chunks):
+            chunk = chunk.strip()
+            if len(chunk) < 40:
+                continue
+            row_id = f"prose::p{p}::c{i}"
+            if G.has_node(row_id):
+                continue
+            G.add_node(
+                row_id,
+                type="Row",
+                label=f"Page {p} prose chunk {i}",
+                entity="",
+                page=p,
+                section="",
+                table_caption="",
+                text=chunk,
+            )
+            G.add_edge(row_id, page_node, relation="on_page")
 
     # ── Continuation edges ────────────────────────────────────────────────
     page_to_sections: dict[int, set] = {}

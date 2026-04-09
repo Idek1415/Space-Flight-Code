@@ -182,8 +182,9 @@ def generate_page_descriptions(G, gen_size: str = "small") -> int:
             continue
 
         prompt = (
-            "Summarize this engineering datasheet page in 2-3 sentences. "
-            "Focus on materials, dimensions, and application conditions.\n"
+            "Summarize the following page content in 2-3 sentences. "
+            "Capture the main topic, key facts, specific values, and "
+            "any important terms or definitions present.\n"
             f"{ctx}\nSummary:"
         )
         description = _run(prompt, max_new_tokens=80)
@@ -265,8 +266,9 @@ def generate_hype_queries(G, gen_size: str = "small") -> int:
                                 else original_text, 200)
 
         prompt = (
-            "Given this engineering data row, write exactly 2 short search "
-            "queries a user might type to find this information. "
+            "Given this data row from a document, write exactly 2 short search "
+            "queries a user might type to find this specific information. "
+            "Use vocabulary appropriate to the content domain. "
             "Output only the queries, one per line.\n"
             f"Section: {section}\nTable: {caption}\nEntity: {entity}\n"
             f"Data: {row_preview}\nQueries:"

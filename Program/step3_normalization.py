@@ -35,9 +35,17 @@ NORMALIZATION_MAP = {
 
 
 def normalize(text):
-    """Apply canonical normalization to a string."""
+    """
+    Apply canonical normalization to a string.
+    Only normalizes short tokens (1-2 words) using fullmatch to prevent
+    substring misfires on non-engineering documents. For example, 'CR'
+    only matches if the entire cell value is 'CR', not if 'CR' appears
+    inside 'credit' or 'MRCR'. Multi-word phrases are returned unchanged.
+    """
     t = text.lower().strip()
+    if len(t.split()) > 2:
+        return text.strip()
     for pattern, canonical in NORMALIZATION_MAP.items():
-        if re.search(pattern, t, re.IGNORECASE):
+        if re.fullmatch(pattern, t, re.IGNORECASE):
             return canonical
     return text.strip()

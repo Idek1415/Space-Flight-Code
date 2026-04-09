@@ -65,9 +65,16 @@ _UNIT_PATTERNS = [
 
 # A cell looks like a data value (not a header) if it matches these
 _DATA_VALUE_RE = re.compile(
-    r'^-?\d|^[A-Z]{2,5}\d|^[-+]|'   # numbers, part codes, signed values
-    r'^\d{1,3}[,/]\d|'              # fractions, ranges like "3/4"
-    r'^(NBR|FKM|EPDM|VMQ|PTFE|CR)\b', re.IGNORECASE
+    r'^-?\d'                               # numbers and negative numbers
+    r'|^[A-Z]{2,5}\d'                      # part codes: NBR70, Q3, FY2023
+    r'|^[-+]'                              # signed values
+    r'|^\$[\d,.]'                          # dollar amounts: $4.2B
+    r'|\d+\s*%'                            # percentages: 42.9%
+    r'|^(NBR|FKM|EPDM|VMQ|PTFE|CR'        # O-ring materials
+    r'|Q[1-4]|FY\d{2,4}'                  # financial periods: Q3, FY2023
+    r'|AAL[123]|SHALL\b|MUST\b'           # security/legal terms
+    r'|True\b|False\b|Yes\b|No\b)\b',     # boolean/binary data values
+    re.IGNORECASE
 )
 
 
