@@ -5,12 +5,12 @@ Generates detailed natural language descriptions for each extracted
 image by running BLIP with multiple targeted prompts and concatenating
 the results into one rich description.
 
-Prompts cover:
-  - Diagram type and overall layout
-  - Visible text, labels, and annotations
-  - Dimensions, measurements, and specifications
-  - Components, parts, and materials
-  - Graph/chart type and axis labels (if applicable)
+Prompts cover (domain-agnostic, suitable for any PDF figure or photo):
+  - Overall scene or layout
+  - Visible text, labels, and captions
+  - Numbers, dates, and other quantitative detail
+  - Main objects, people, or visual elements
+  - Charts, plots, or diagrams and their labels (when present)
 
 Model choice
 ------------
@@ -65,14 +65,14 @@ def configure_caption_model(size: str) -> str:
     _model = None
     return MODEL_NAME
 
-# Each prompt targets a different aspect of the image.
+# Each prompt targets a different aspect of the image (BLIP conditional prefix).
 # Results are concatenated into one description per image.
 _CAPTION_PROMPTS = [
-    "a technical engineering diagram showing",
-    "the labels, annotations, and text visible in this diagram include",
-    "the dimensions, measurements, and numerical specifications shown are",
-    "the components, parts, and materials visible in this image are",
-    "the type of chart or graph shown, including axis labels, is",
+    "a photograph or illustration showing",
+    "the text, labels, and captions visible in this image include",
+    "any numbers, dates, or quantitative details shown are",
+    "the main objects, people, or visual elements in this image are",
+    "the type of chart, plot, or diagram shown, including any axes or legends, is",
 ]
 
 

@@ -10,6 +10,7 @@ Saved structure (in a folder beside the PDF):
         index_meta.json   — node IDs and types (texts reconstructed from graph)
         embeddings.pt     — torch tensor (float16 for ~50% size savings)
         hnsw.bin          — HNSW ANN index (avoids rebuild on load)
+        bm25.pkl          — sparse BM25 index (rank_bm25), optional
         metadata.json     — PDF hash, timestamps, model names
 
 The PDF is identified by a SHA-256 hash, so if the file changes the
@@ -40,9 +41,16 @@ except ImportError:
 # Path helpers
 # ---------------------------------------------------------------------------
 
-def _save_dir(pdf_path: str | Path) -> Path:
+def _bundle_dir(pdf_path: str | Path, save_root: Path | None = None) -> Path:
+    """Directory for a PDF's KG bundle: beside the PDF, or under ``save_root``."""
     p = Path(pdf_path).resolve()
+    if save_root is not None:
+        return Path(save_root).resolve() / f"{p.stem}_kg"
     return p.parent / f"{p.stem}_kg"
+
+
+def _save_dir(pdf_path: str | Path) -> Path:
+    return _bundle_dir(pdf_path, None)
 
 
 def _pdf_hash(pdf_path: str | Path) -> str:
@@ -79,19 +87,22 @@ def save_kg(
     *,
     model_name:    str = "",
     caption_model: str = "",
+    save_root: Path | None = None,
 ) -> Path:
     """
-    Save graph and index to disk beside the PDF.
+    Save graph and index to disk beside the PDF, or under ``save_root`` as
+    ``{pdf_stem}_kg/`` when ``save_root`` is set.
 
     Storage optimisations applied:
     - Cell/Triple nodes pruned from graph (redundant with Row text)
     - Embeddings stored in float16 (halves size, negligible quality loss)
     - HNSW index persisted (avoids rebuild on load)
+    - BM25 index persisted when present (rebuilt from texts on load if missing)
     - Index texts omitted from JSON (reconstructed from graph on load)
 
     Returns the save directory path.
     """
-    save_dir = _save_dir(pdf_path)
+    save_dir = _bundle_dir(pdf_path, save_root)
     save_dir.mkdir(parents=True, exist_ok=True)
 
     # Graph — prune redundant Cell / Triple nodes
@@ -109,9 +120,10 @@ def save_kg(
     with open(save_dir / "index_meta.json", "w") as f:
         json.dump(index_data, f)
 
-    # Embeddings — stored as float16 (~50% size savings)
-    if index.get("embeddings") is not None:
-        torch.save(index["embeddings"].half().cpu(), save_dir / "embeddings.pt")
+    # Embeddings — stored as float16 (~50% size savings), always CPU
+    emb = index.get("embeddings")
+    if emb is not None:
+        torch.save(emb.detach().half().cpu(), save_dir / "embeddings.pt")
 
     # HNSW index
     hnsw = index.get("hnsw")
@@ -121,9 +133,26 @@ def save_kg(
         except Exception:
             pass
 
+    # BM25 sparse index (hybrid retrieval)
+    bm25 = index.get("bm25")
+    bm25_path = save_dir / "bm25.pkl"
+    if bm25 is not None:
+        try:
+            with open(bm25_path, "wb") as f:
+                pickle.dump(bm25, f, protocol=pickle.HIGHEST_PROTOCOL)
+        except Exception as e:
+            print(f"  Warning: could not save BM25 index: {e}")
+    elif bm25_path.exists():
+        try:
+            bm25_path.unlink()
+        except OSError:
+            pass
+
     # Metadata
+    p = Path(pdf_path).resolve()
     meta = {
-        "pdf_path":      str(Path(pdf_path).resolve()),
+        "pdf_path":      str(p),
+        "pdf_stem":      p.stem,
         "pdf_hash":      _pdf_hash(pdf_path),
         "saved_at":      datetime.now().isoformat(),
         "model_name":    model_name,
@@ -144,9 +173,12 @@ def save_kg(
 # Load
 # ---------------------------------------------------------------------------
 
-def load_kg(pdf_path: str | Path) -> tuple | None:
+def load_kg(pdf_path: str | Path, *, save_root: Path | None = None) -> tuple | None:
     """
     Load a previously saved graph and index.
+
+    Looks beside the PDF by default, or under ``save_root`` / ``{stem}_kg`` when
+    ``save_root`` is set (same layout as :func:`save_kg`).
 
     Returns (G, index, metadata) if a valid save exists and the PDF hash matches,
     or None if nothing is saved or the PDF has changed.
@@ -154,7 +186,7 @@ def load_kg(pdf_path: str | Path) -> tuple | None:
     Handles both legacy saves (texts in JSON, float32 embeddings) and
     optimised saves (texts reconstructed from graph, float16 → float32).
     """
-    save_dir  = _save_dir(pdf_path)
+    save_dir  = _bundle_dir(pdf_path, save_root)
     meta_path = save_dir / "metadata.json"
 
     if not meta_path.exists():
@@ -212,11 +244,28 @@ def load_kg(pdf_path: str | Path) -> tuple | None:
         except Exception:
             hnsw = None
 
+    bm25 = None
+    bm25_path = save_dir / "bm25.pkl"
+    if bm25_path.exists():
+        try:
+            with open(bm25_path, "rb") as f:
+                bm25 = pickle.load(f)
+        except Exception:
+            bm25 = None
+    if bm25 is None and texts:
+        try:
+            from Program.step5_query_helpers import _build_bm25
+
+            bm25 = _build_bm25(texts)
+        except Exception:
+            bm25 = None
+
     index = {
         "ids":        ids,
         "types":      types,
         "texts":      texts,
         "embeddings": embeddings,
+        "bm25":       bm25,
         "hnsw":       hnsw,
     }
 
