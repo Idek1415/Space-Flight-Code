@@ -8,7 +8,8 @@ Saved structure (in a folder beside the PDF):
     <pdf_stem>_kg/
         graph.pkl         — NetworkX graph (pickle, Cell/Triple nodes pruned)
         index_meta.json   — node IDs and types (texts reconstructed from graph)
-        embeddings.pt     — torch tensor (float16 for ~50% size savings)
+        embeddings.pt     — torch tensor (float16 for ~50% size savings), mean-centered
+        corpus_mean.pt    — 1×d mean vector used to center queries (float32)
         hnsw.bin          — HNSW ANN index (avoids rebuild on load)
         bm25.pkl          — sparse BM25 index (rank_bm25), optional
         metadata.json     — PDF hash, timestamps, model names
@@ -125,6 +126,16 @@ def save_kg(
     if emb is not None:
         torch.save(emb.detach().half().cpu(), save_dir / "embeddings.pt")
 
+    cm_path = save_dir / "corpus_mean.pt"
+    cm = index.get("corpus_mean")
+    if cm is not None:
+        torch.save(cm.detach().float().cpu(), cm_path)
+    elif cm_path.exists():
+        try:
+            cm_path.unlink()
+        except OSError:
+            pass
+
     # HNSW index
     hnsw = index.get("hnsw")
     if hnsw is not None and _HNSW_AVAILABLE:
@@ -224,6 +235,13 @@ def load_kg(pdf_path: str | Path, *, save_root: Path | None = None) -> tuple | N
         if embeddings is not None and embeddings.dtype == torch.float16:
             embeddings = embeddings.float()
 
+    corpus_mean = None
+    cm_path = save_dir / "corpus_mean.pt"
+    if cm_path.exists():
+        corpus_mean = torch.load(cm_path, map_location="cpu")
+        if corpus_mean is not None and corpus_mean.dtype == torch.float16:
+            corpus_mean = corpus_mean.float()
+
     ids   = index_data.get("ids", [])
     types = index_data.get("types", [])
 
@@ -261,12 +279,13 @@ def load_kg(pdf_path: str | Path, *, save_root: Path | None = None) -> tuple | N
             bm25 = None
 
     index = {
-        "ids":        ids,
-        "types":      types,
-        "texts":      texts,
-        "embeddings": embeddings,
-        "bm25":       bm25,
-        "hnsw":       hnsw,
+        "ids":          ids,
+        "types":        types,
+        "texts":        texts,
+        "embeddings":   embeddings,
+        "corpus_mean":  corpus_mean,
+        "bm25":         bm25,
+        "hnsw":         hnsw,
     }
 
     print(f"  Loaded: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges, "

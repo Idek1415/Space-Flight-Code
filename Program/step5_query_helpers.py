@@ -448,12 +448,13 @@ def build_index(G) -> dict:
     Returns
     -------
     {
-        "ids":        list[str],
-        "types":      list[str],
-        "texts":      list[str],
-        "embeddings": torch.Tensor (n × d),
-        "bm25":       BM25Okapi | None,
-        "hnsw":       hnswlib.Index | None,
+        "ids":          list[str],
+        "types":        list[str],
+        "texts":        list[str],
+        "embeddings":   torch.Tensor (n × d), mean-centered per dimension
+        "corpus_mean":  torch.Tensor (1 × d) | None — subtract from query embeddings at search time
+        "bm25":         BM25Okapi | None,
+        "hnsw":         hnswlib.Index | None,
     }
     """
     model = _get_model()
@@ -468,7 +469,7 @@ def build_index(G) -> dict:
 
     if not ids:
         return {"ids": [], "types": [], "texts": [],
-                "embeddings": None, "bm25": None}
+                "embeddings": None, "corpus_mean": None, "bm25": None}
 
     print(f"  Indexing {len(ids)} nodes "
           f"({types.count('Row')} rows, {types.count('Image')} images)...")
@@ -490,6 +491,9 @@ def build_index(G) -> dict:
     embeddings = torch.cat(chunks, dim=0)
     status_line_done(f"  Encoding (dense)... 100% ({n}/{n}) — done.")
 
+    corpus_mean = embeddings.mean(dim=0, keepdim=True)
+    embeddings = embeddings - corpus_mean
+
     # BM25 sparse index
     bm25 = None
     if _BM25_AVAILABLE:
@@ -506,7 +510,8 @@ def build_index(G) -> dict:
         print("  Note: HNSW unavailable — falling back to full dense scan.", flush=True)
 
     return {"ids": ids, "types": types, "texts": texts,
-            "embeddings": embeddings, "bm25": bm25, "hnsw": hnsw_index}
+            "embeddings": embeddings, "corpus_mean": corpus_mean,
+            "bm25": bm25, "hnsw": hnsw_index}
 
 
 # ---------------------------------------------------------------------------
@@ -585,6 +590,11 @@ def query(
         if hyde_emb is not None:
             pos_emb = (pos_emb + hyde_emb) / 2.0
 
+    corpus_mean = index.get("corpus_mean")
+    if corpus_mean is not None:
+        cm = corpus_mean.to(device=pos_emb.device, dtype=pos_emb.dtype)
+        pos_emb = pos_emb - cm
+
     candidate_idxs: list[int] | None = _hnsw_candidates(index, pos_emb, len(index["ids"]))
     if candidate_idxs:
         subset = embeddings[candidate_idxs]
@@ -602,6 +612,10 @@ def query(
             continue
         try:
             neg_emb = model.encode(term, convert_to_tensor=True, device=DEVICE)
+            if corpus_mean is not None:
+                neg_emb = neg_emb - corpus_mean.to(
+                    device=neg_emb.device, dtype=neg_emb.dtype
+                )
             if candidate_idxs:
                 n_sims = util.cos_sim(neg_emb, embeddings[candidate_idxs])[0].tolist()
                 for i, ns in zip(candidate_idxs, n_sims):
@@ -680,7 +694,10 @@ def query(
                       if G.has_node(page_node) else "")
 
         # Sentence-level relevance for highlighting
-        top_sents = _top_sentences(node_data.get("text", ""), pos_emb, model, top_n=3)
+        top_sents = _top_sentences(
+            node_data.get("text", ""), pos_emb, model, top_n=3,
+            corpus_mean=corpus_mean,
+        )
 
         result: dict = {
             "rank":          rank,
@@ -762,6 +779,7 @@ def _top_sentences(
     query_emb: torch.Tensor,
     model: SentenceTransformer,
     top_n: int = 3,
+    corpus_mean: torch.Tensor | None = None,
 ) -> list[str]:
     """
     Return the top_n sentences from node_text most similar to query_emb.
@@ -775,6 +793,9 @@ def _top_sentences(
     try:
         sent_embs = model.encode(sentences, convert_to_tensor=True,
                                  show_progress_bar=False, device=DEVICE)
+        if corpus_mean is not None:
+            cm = corpus_mean.to(device=sent_embs.device, dtype=sent_embs.dtype)
+            sent_embs = sent_embs - cm
         sims   = util.cos_sim(query_emb.unsqueeze(0), sent_embs)[0].tolist()
         ranked = sorted(zip(sentences, sims), key=lambda x: x[1], reverse=True)
         return [s for s, _ in ranked[:top_n]]

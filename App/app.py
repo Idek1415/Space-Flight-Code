@@ -124,6 +124,16 @@ def app_save_kg(pdf_path: Path, G, index: dict,
     if index.get("embeddings") is not None:
         torch.save(index["embeddings"].half().cpu(), save_dir / "embeddings.pt")
 
+    cm_path = save_dir / "corpus_mean.pt"
+    cm = index.get("corpus_mean")
+    if cm is not None:
+        torch.save(cm.detach().float().cpu(), cm_path)
+    elif cm_path.exists():
+        try:
+            cm_path.unlink()
+        except OSError:
+            pass
+
     # Persist HNSW index
     hnsw = index.get("hnsw")
     if hnsw is not None:
@@ -183,6 +193,13 @@ def app_load_kg(pdf_path: Path):
         if embeddings is not None and embeddings.dtype == torch.float16:
             embeddings = embeddings.float()
 
+    corpus_mean = None
+    cm_path = save_dir / "corpus_mean.pt"
+    if cm_path.exists():
+        corpus_mean = torch.load(cm_path, map_location="cpu")
+        if corpus_mean is not None and corpus_mean.dtype == torch.float16:
+            corpus_mean = corpus_mean.float()
+
     ids   = idx_data.get("ids", [])
     types = idx_data.get("types", [])
 
@@ -205,11 +222,12 @@ def app_load_kg(pdf_path: Path):
             hnsw = None
 
     index = {
-        "ids":        ids,
-        "types":      types,
-        "texts":      texts,
-        "embeddings": embeddings,
-        "hnsw":       hnsw,
+        "ids":          ids,
+        "types":        types,
+        "texts":        texts,
+        "embeddings":   embeddings,
+        "corpus_mean":  corpus_mean,
+        "hnsw":         hnsw,
     }
     return G, index, meta
 
@@ -1523,12 +1541,22 @@ class MainWindow(QMainWindow):
         emb_path   = save_dir / "embeddings.pt"
         embeddings = (torch.load(emb_path, map_location="cpu")
                       if emb_path.exists() else None)
+        if embeddings is not None and embeddings.dtype == torch.float16:
+            embeddings = embeddings.float()
+
+        corpus_mean = None
+        cm_path = save_dir / "corpus_mean.pt"
+        if cm_path.exists():
+            corpus_mean = torch.load(cm_path, map_location="cpu")
+            if corpus_mean is not None and corpus_mean.dtype == torch.float16:
+                corpus_mean = corpus_mean.float()
 
         index = {
-            "ids":        idx_data.get("ids", []),
-            "types":      idx_data.get("types", []),
-            "texts":      idx_data.get("texts", []),
-            "embeddings": embeddings,
+            "ids":          idx_data.get("ids", []),
+            "types":        idx_data.get("types", []),
+            "texts":        idx_data.get("texts", []),
+            "embeddings":   embeddings,
+            "corpus_mean":  corpus_mean,
         }
         meta = {}
         if meta_path.exists():
