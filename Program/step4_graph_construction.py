@@ -40,12 +40,15 @@ def _split_prose_chunks(text: str, max_chars: int = 400) -> list[str]:
         else:
             if current:
                 chunks.append(current)
+                overlap_words = current.split()[-10:]
+                overlap = " ".join(overlap_words)
+                current = overlap
             # If a single sentence exceeds max_chars, split it hard
             if len(sent) > max_chars:
                 for i in range(0, len(sent), max_chars):
                     chunks.append(sent[i:i + max_chars])
             else:
-                current = sent
+                current = (current + " " + sent).strip() if current else sent
     if current:
         chunks.append(current)
     return chunks
