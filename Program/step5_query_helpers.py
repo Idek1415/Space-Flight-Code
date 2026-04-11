@@ -669,9 +669,34 @@ def query(
 
     alpha, beta = _adaptive_page_weights(page_to_items)
     page_scores: list[tuple[int, float]] = []
+    use_multivector = not bool(negated_terms)
+
     for page, items in page_to_items.items():
-        values = [s for _, s in items]
-        pg_sc  = alpha * max(values) + beta * (sum(values) / len(values))
+        if use_multivector:
+            structured = [(idx, s) for idx, s in items
+                          if not index["ids"][idx].startswith("prose::")]
+            unstructured = [(idx, s) for idx, s in items
+                              if index["ids"][idx].startswith("prose::")]
+
+            def _blend(bucket):
+                values = [s for _, s in bucket]
+                return alpha * max(values) + beta * (sum(values) / len(values))
+
+            if structured and unstructured:
+                best_struct = max(s for _, s in structured)
+                best_unstruct = max(s for _, s in unstructured)
+                total = abs(best_struct) + abs(best_unstruct)
+                struct_weight = (abs(best_struct) / total) if total > 0 else 0.5
+                struct_weight = max(0.35, min(0.65, struct_weight))
+                pg_sc = struct_weight * _blend(structured) + (1.0 - struct_weight) * _blend(unstructured)
+            elif structured:
+                pg_sc = _blend(structured)
+            else:
+                pg_sc = _blend(unstructured)
+        else:
+            values = [s for _, s in items]
+            pg_sc = alpha * max(values) + beta * (sum(values) / len(values))
+
         page_scores.append((page, pg_sc))
 
     # Sort by fused page score so CE sees the true top-N candidates (dict order is arbitrary).
