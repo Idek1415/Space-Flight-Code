@@ -12,6 +12,18 @@ import matplotlib.patches as mpatches
 from pathlib import Path
 import pickle
 import sys
+import argparse
+
+PROGRAM_DIR = Path(__file__).parent.resolve()
+PROJECT_DIR = PROGRAM_DIR.parent
+for _p in (str(PROJECT_DIR), str(PROGRAM_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+try:
+    from Program.step4_persistence import list_saved_kgs
+except ImportError:
+    from step4_persistence import list_saved_kgs
 
 
 def _subsample_graph(G, max_nodes):
@@ -62,6 +74,9 @@ def visualize_graph_pyqt(
     node_xy = {n: (float(x) * scale, float(y) * scale) for n, (x, y) in pos.items()}
 
     type_colors = {
+        "PDF": "#355C7D",
+        "SemanticChunk": "#2A9D8F",
+        "Sentence": "#7FB3D5",
         "Section": "#7F77DD",
         "Table": "#1D9E75",
         "Record": "#3B8BD4",
@@ -260,6 +275,9 @@ def visualize_graph(G, max_nodes=1000, output_path=None):
         output_path: If provided, save image to this path instead of showing
     """
     type_colors = {
+        "PDF":       "#355C7D",
+        "SemanticChunk": "#2A9D8F",
+        "Sentence":  "#7FB3D5",
         "Section":   "#7F77DD",
         "Table":     "#1D9E75",
         "Record":    "#3B8BD4",
@@ -335,12 +353,49 @@ def visualize_graph(G, max_nodes=1000, output_path=None):
 
 
 if __name__ == "__main__":
-    project_root = Path(__file__).resolve().parents[1]
-    kg_dir = project_root / "Testing" / "saved_testing_kg" / "attention_is_all_you_need_kg"
-    graph_path = kg_dir / "graph.pkl"
+    parser = argparse.ArgumentParser(description="Visualize a saved knowledge graph")
+    parser.add_argument(
+        "--kg-dir",
+        type=str,
+        default="",
+        help="Path to a saved KG directory containing graph.pkl",
+    )
+    parser.add_argument(
+        "--search-dir",
+        type=str,
+        default="",
+        help="Directory to scan for saved KGs when --kg-dir is omitted",
+    )
+    parser.add_argument("--max-nodes", type=int, default=None)
+    parser.add_argument("--max-edges", type=int, default=10000)
+    args = parser.parse_args()
 
-    if not graph_path.exists():
-        print(f'No saved KG found for "attention is all you need" at: {kg_dir}')
+    graph_path: Path | None = None
+
+    if args.kg_dir:
+        candidate = Path(args.kg_dir).resolve() / "graph.pkl"
+        if candidate.exists():
+            graph_path = candidate
+    else:
+        project_root = Path(__file__).resolve().parents[1]
+        search_root = Path(args.search_dir).resolve() if args.search_dir else project_root
+        saved = list_saved_kgs(search_root)
+        if saved:
+            # Prefer the Attention Is All You Need bundle when present.
+            preferred_dir: Path | None = None
+            for item in saved:
+                save_dir = Path(item.get("save_dir", "")).resolve()
+                if save_dir.name == "attention_is_all_you_need_kg":
+                    preferred_dir = save_dir
+                    break
+
+            chosen_dir = preferred_dir or Path(saved[0]["save_dir"]).resolve()
+            candidate = chosen_dir / "graph.pkl"
+            if candidate.exists():
+                graph_path = candidate
+
+    if graph_path is None:
+        print("No saved KG found. Pass --kg-dir or build/save a KG first.")
         sys.exit(0)
 
     try:
@@ -350,11 +405,11 @@ if __name__ == "__main__":
         print(f"Failed to load saved KG from {graph_path}: {e}")
         sys.exit(1)
 
-    print(f'Loaded KG for "attention is all you need" from: {graph_path}')
+    print(f"Loaded KG from: {graph_path}")
     launched = visualize_graph_pyqt(
         G,
-        max_nodes=None,
-        max_edges=10000,
+        max_nodes=args.max_nodes,
+        max_edges=args.max_edges,
     )
     if not launched:
         print("  Failed to launch PyQt6 viewer.")

@@ -35,9 +35,7 @@ for _p in (str(PROJECT_DIR), str(PROGRAM_DIR), str(APP_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from Program.step1_pdf_extraction    import extract_tables_with_context
-from Program.step1b_image_extraction import extract_images
-from Program.step1c_image_captioning import caption_images, configure_caption_model
+from Program.step1_pdf_extraction    import extract_pdf
 from Program.step4_graph_construction import build_knowledge_graph
 from Program.step5_query_helpers     import (
     build_index,
@@ -48,7 +46,7 @@ from Program.step5_query_helpers     import (
     configure_embedder_from_saved,
 )
 from Program.step6_visualization     import visualize_graph
-from Program.step7_persistence       import save_kg, load_kg, delete_kg
+from Program.step4_persistence       import save_kg, load_kg, delete_kg
 
 # Default handbook filename (same file users often keep on Desktop)
 HANDBOOK_PDF_NAME = "Catalog_O-Ring-Handbook_PTD5705-EN.pdf"
@@ -80,26 +78,19 @@ def _ask_choice(prompt: str, valid: tuple[str, ...], default: str) -> str:
 
 def _prompt_run_options(default_include_images: bool) -> tuple[bool, str, str]:
     """
-    Prompt once at startup for image inclusion + model sizes.
+    Prompt once at startup for model sizes.
     Returns: (include_images, caption_size, embedder_size)
     """
     print("\n=== Runtime options (build from PDF) ===")
     if not _stdin_is_tty():
-        include_images = default_include_images
+        include_images = False
         caption_size = "small"
         embedder_size = "large"
         print("  Non-interactive run detected; using defaults.")
         return include_images, caption_size, embedder_size
 
-    include_default = "y" if default_include_images else "n"
-    include = _ask_choice("Include images in KG build?", ("y", "n"), include_default) == "y"
+    include = False
     caption_size = "small"
-    if include:
-        caption_size = _ask_choice(
-            "Caption model size? (BLIP)",
-            ("small", "large"),
-            "small",
-        )
     embedder_size = _ask_choice(
         "Query embedder size? (SentenceTransformer)",
         ("small", "large"),
@@ -186,7 +177,7 @@ def _find_handbook_on_desktop() -> Path | None:
     return None
 
 
-def _extract_pdf_or_exit(pdf_path: Path, *, cli_argument: str | None) -> list:
+def _extract_pdf_or_exit(pdf_path: Path, *, cli_argument: str | None) -> dict:
     """
     Echo resolved path to stdout (IDE run configs often hide stderr), verify file, extract.
     cli_argument: original argv string if from CLI, else None.
@@ -208,12 +199,14 @@ def _extract_pdf_or_exit(pdf_path: Path, *, cli_argument: str | None) -> list:
         sys.exit(1)
 
     try:
-        extracted = extract_tables_with_context(str(pdf_path))
+        extracted = extract_pdf(str(pdf_path))
     except OSError as e:
         print(str(e), flush=True)
         sys.exit(1)
 
-    print(f"  Found {len(extracted)} table(s).\n")
+    page_count = len(extracted.get("pages", {}))
+    table_count = sum(len(p.get("tables", [])) for p in extracted.get("pages", {}).values())
+    print(f"  Parsed {page_count} page(s), {table_count} table(s).\n")
     return extracted
 
 
@@ -221,39 +214,63 @@ def _extract_pdf_or_exit(pdf_path: Path, *, cli_argument: str | None) -> list:
 # Demo data (synthetic O-ring tables — no PDF required)
 # ---------------------------------------------------------------------------
 
-DEMO_TABLES = [
-    {
-        "page": 1,
-        "bbox": (40, 100, 560, 300),
-        "section_heading": "AS568 Standard O-Ring Dimensions",
-        "caption_above": "Table 1 — Dash sizes, NBR compound, 70 Shore A",
-        "table": [
-            ["Dash No.", "ID (in)", "ID (mm)", "Cross-section (in)", "Cross-section (mm)", "Material"],
-            ["-001*",   "0.029",   "0.74",    "0.040",              "1.02",               "NBR"],
-            ["-002*",   "0.042",   "1.07",    "0.050",              "1.27",               "NBR"],
-            ["-003",    "0.056",   "1.42",    "0.060",              "1.52",               "NBR"],
-            ["-004",    "0.070",   "1.78",    "0.070",              "1.78",               "NBR"],
-            ["-005",    "0.101",   "2.57",    "0.070",              "1.78",               "Viton"],
-        ],
-        "notes_below": "* Not recommended for dynamic applications. Temperature range: -40°F to +250°F.",
-        "footnotes": {"*": "Not recommended for dynamic applications. Temperature range: -40°F to +250°F."},
+DEMO_DOC = {
+    "title": "Synthetic O-Ring Reference",
+    "pages": {
+        1: {
+            "sections": [
+                {
+                    "heading": "AS568 Standard O-Ring Dimensions",
+                    "level": 1,
+                    "sentences": [
+                        "This section summarizes representative AS568 dash sizes.",
+                        "The rows provide ID and cross-section dimensions for NBR compounds.",
+                    ],
+                    "page": 1,
+                }
+            ],
+            "tables": [
+                {
+                    "raw": [
+                        ["Dash No.", "ID (in)", "ID (mm)", "Cross-section (in)", "Cross-section (mm)", "Material"],
+                        ["-001*",   "0.029",   "0.74",    "0.040",              "1.02",               "NBR"],
+                        ["-002*",   "0.042",   "1.07",    "0.050",              "1.27",               "NBR"],
+                        ["-005",    "0.101",   "2.57",    "0.070",              "1.78",               "Viton"],
+                    ],
+                    "caption": "Table 1 - Dash sizes, NBR compound, 70 Shore A",
+                    "bbox": (40, 100, 560, 300),
+                    "page": 1,
+                }
+            ],
+        },
+        2: {
+            "sections": [
+                {
+                    "heading": "Material Compatibility",
+                    "level": 1,
+                    "sentences": [
+                        "Material compatibility depends on pressure and temperature limits.",
+                        "NBR and FKM provide different thermal and chemical resistance windows.",
+                    ],
+                    "page": 2,
+                }
+            ],
+            "tables": [
+                {
+                    "raw": [
+                        ["Material", "Max Pressure (PSI)", "Max Temp (degF)", "Min Temp (degF)", "Application"],
+                        ["NBR",      "3000",               "250",             "-40",             "Hydraulic"],
+                        ["FKM",      "3000",               "400",             "-15",             "Chemical"],
+                        ["EPDM",     "1500",               "300",             "-65",             "Steam"],
+                    ],
+                    "caption": "Table 2 - Pressure ratings by compound",
+                    "bbox": (40, 120, 560, 320),
+                    "page": 2,
+                }
+            ],
+        },
     },
-    {
-        "page": 2,
-        "bbox": (40, 120, 560, 320),
-        "section_heading": "Material Compatibility",
-        "caption_above": "Table 2 — Pressure ratings by compound",
-        "table": [
-            ["Material", "Max Pressure (PSI)", "Max Temp (°F)", "Min Temp (°F)", "Application"],
-            ["NBR",      "3000",               "250",           "-40",           "Hydraulic"],
-            ["FKM",      "3000",               "400",           "-15",           "Chemical"],
-            ["EPDM",     "1500",               "300",           "-65",           "Steam"],
-            ["Silicone", "500",                "450",           "-175",          "High temp"],
-        ],
-        "notes_below": "",
-        "footnotes": {},
-    },
-]
+}
 
 
 # ---------------------------------------------------------------------------
@@ -311,55 +328,30 @@ def main():
             configure_embedder_from_saved(
                 load_meta.get("model_name") if load_meta else None
             )
-            print("\n  Saved KG loaded — skipping questions about images, captions, and embedder size.")
+            print("\n  Saved KG loaded — skipping runtime model configuration.")
 
     if not loaded_from_disk:
         include_images, caption_size, embedder_size = _prompt_run_options(
             default_include_images=not args.no_images
         )
         configure_embedder_model(embedder_size)
-        if include_images:
-            configure_caption_model(caption_size)
-        elif args.no_images is False:
-            args.no_images = True
     else:
         include_images = False
 
-    # Step 1: Ingest tables (skip when graph was loaded)
-    image_records: list = []
+    # Step 1: Extract structured document from PDF (skip when graph was loaded)
     extracted = None
 
     if G is not None:
         pass
     elif args.demo:
         print("\n=== DEMO MODE (synthetic O-ring data) ===\n")
-        extracted = DEMO_TABLES
+        extracted = DEMO_DOC
     elif args.pdf:
-        print("\nExtracting tables from CLI path...")
+        print("\nExtracting structured document from CLI path...")
         extracted = _extract_pdf_or_exit(_resolve_pdf_path(args.pdf), cli_argument=args.pdf)
-
-        if include_images:
-            print("Extracting images...")
-            image_records = extract_images(pdf_path_str)  # type: ignore[arg-type]
-            if image_records and not args.no_captions:
-                print(f"\nGenerating image captions...")
-                image_records = caption_images(image_records)
-            elif image_records:
-                print(f"  Skipping captions (--no-captions). {len(image_records)} image(s) linked by position only.")
-            print()
     elif pdf_path_str:
-        print("\nExtracting tables (no CLI path — using handbook on Desktop)...")
+        print("\nExtracting structured document (no CLI path — using handbook on Desktop)...")
         extracted = _extract_pdf_or_exit(Path(pdf_path_str), cli_argument=None)
-
-        if include_images:
-            print("Extracting images...")
-            image_records = extract_images(pdf_path_str)
-            if image_records and not args.no_captions:
-                print(f"\nGenerating image captions...")
-                image_records = caption_images(image_records)
-            elif image_records:
-                print(f"  Skipping captions (--no-captions). {len(image_records)} image(s) linked by position only.")
-            print()
     else:
         tried = "\n    ".join(str(p) for p in _handbook_pdf_candidates())
         print(
@@ -371,12 +363,13 @@ def main():
             '    python main.py "C:\\Users\\YOU\\Desktop\\Catalog_O-Ring-Handbook_PTD5705-EN.pdf"\n',
             flush=True,
         )
-        extracted = DEMO_TABLES
+        extracted = DEMO_DOC
 
     # Steps 2–4: Parse, normalize, build graph (skip if loaded from save)
     if G is None:
         print("Building knowledge graph...")
-        G = build_knowledge_graph(extracted, image_records=image_records or None)
+        source_pdf = pdf_path_str if pdf_path_str else "demo.pdf"
+        G = build_knowledge_graph(extracted, source_pdf)
     print(f"  Nodes: {G.number_of_nodes()}")
     print(f"  Edges: {G.number_of_edges()}")
 
@@ -401,10 +394,9 @@ def main():
                 ans = "n"
             if ans == "y":
                 import step5_query_helpers as _s5
-                import step1c_image_captioning as _s1c
                 save_kg(pdf_path_str, G, index,
                         model_name=_s5.MODEL_NAME,
-                        caption_model=_s1c.MODEL_NAME)
+                        caption_model="")
         except Exception as e:
             print(f"  Could not save KG: {e}")
 
